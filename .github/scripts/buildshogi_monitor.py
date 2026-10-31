@@ -47,12 +47,18 @@ def health_time(v):
     fraction=v[20:-1] if len(v)>20 else ""
     return int(base.timestamp())*10**9+int((fraction+"0"*9)[:9])
 def binding(b):
-    keys={"schema","enabled","workflowID","stateIssue","alertIssue","scriptSHA256","workflowSHA256","productionCoverageVerified"}
-    if (not isinstance(b,dict) or set(b)!=keys or type(b["schema"]) is not int or b["schema"]!=1
+    keys={"schema","enabled","workflowID","stateIssue","alertIssue","scriptSHA256","workflowSHA256","productionCoverageVerified","bootstrap"}
+    if (not isinstance(b,dict) or set(b)!=keys or type(b["schema"]) is not int or b["schema"]!=2
         or b["enabled"] is not True or any(not positive(b[k]) for k in ["workflowID","stateIssue","alertIssue"])
         or b["stateIssue"]==b["alertIssue"] or b["productionCoverageVerified"] is not False
         or any(not isinstance(b[k],str) or not SHA.fullmatch(b[k]) for k in ["scriptSHA256","workflowSHA256"])):
         fail("reviewed-binding-required-no-auto-bootstrap")
+    anchor=b["bootstrap"]
+    if (not isinstance(anchor,dict) or set(anchor)!={"runID","runNumber","headSHA","stateSHA256"}
+        or not positive(anchor["runID"]) or not positive(anchor["runNumber"])
+        or not isinstance(anchor["headSHA"],str) or not re.fullmatch(r"[a-f0-9]{40}",anchor["headSHA"])
+        or not isinstance(anchor["stateSHA256"],str) or not SHA.fullmatch(anchor["stateSHA256"])):
+        fail("verified-bootstrap-anchor-required")
     return b
 def state(v):
     keys={"schema","sequence","highWater","previousStateSHA256","lastRunID","lastRunNumber","lastRunHeadSHA","status"}
@@ -84,14 +90,23 @@ def run(v,b,*,run_id=None,number=None,head=None,current=False):
         fail("workflow-journal-history-unconfirmed")
     return v
 
-def bootstrap_proposal(workflow_id,baseline,now):
-    """Review-only bot Issue requests. Never invoked by the workflow."""
+def bootstrap_proposal(workflow_id,baseline,now,*,current):
+    """Review-only requests anchored to the bootstrap run, not the earlier dry run.
+
+    Same-workflow bootstrap consumes the next run number. Anchoring to the
+    earlier baseline would make the first observer see a journal gap.
+    """
     if not positive(workflow_id):fail("pinned-workflow-required")
     run(baseline,{"workflowID":workflow_id})
-    stamp(now)
+    run(current,{"workflowID":workflow_id},current=True)
+    if (baseline.get("event")!="workflow_dispatch" or current.get("event")!="workflow_dispatch"
+        or current["id"]==baseline["id"] or current["run_number"]!=baseline["run_number"]+1
+        or not isinstance(baseline.get("updated_at"),str)
+        or stamp(now)<stamp(baseline["updated_at"])):
+        fail("exact-successful-baseline-and-next-bootstrap-run-required")
     initial=state({"schema":2,"sequence":0,"highWater":now,"previousStateSHA256":None,
-                   "lastRunID":baseline["id"],"lastRunNumber":baseline["run_number"],
-                   "lastRunHeadSHA":baseline["head_sha"],"status":"blocked"})
+                   "lastRunID":current["id"],"lastRunNumber":current["run_number"],
+                   "lastRunHeadSHA":current["head_sha"],"status":"blocked"})
     alert={"schema":2,"status":"blocked","reason":"coverage-unverified"}
     requests=[{"method":"POST","url":API+"/issues","body":{"title":title,"body":marker+encoded(value),"state":"open"}}
               for title,marker,value in [(STATE_TITLE,MARKER,initial),(ALERT_TITLE,ALERT_MARKER,alert)]]
@@ -140,6 +155,11 @@ def cycle(b,context,http,now):
     current=run(http.send("GET",API+"/actions/runs/"+str(context["runID"])),b,run_id=context["runID"],head=context["headSHA"],current=True)
     state_url=API+"/issues/"+str(b["stateIssue"]);alert_url=API+"/issues/"+str(b["alertIssue"])
     before=state(issue(http.send("GET",state_url),b["stateIssue"],STATE_TITLE,MARKER))
+    anchor=b["bootstrap"]
+    if before["sequence"]!=before["lastRunNumber"]-anchor["runNumber"]:
+        fail("checkpoint-outside-bootstrap-journal")
+    if before["sequence"]==0 and (before["lastRunID"]!=anchor["runID"] or before["lastRunHeadSHA"]!=anchor["headSHA"] or digest(before)!=anchor["stateSHA256"]):
+        fail("initial-bootstrap-checkpoint-conflict")
     if stamp(now)<stamp(before["highWater"]):fail("clock-rollback-hold")
     if current["run_number"]!=before["lastRunNumber"]+1:fail("journal-gap-no-automatic-recovery")
     http.allow_prior(before["lastRunID"])
