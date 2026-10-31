@@ -1,4 +1,4 @@
-# ONE SHOT LOCAL PROPOSAL. No schedule, DB, collection, health or deletion.
+# PHASE 1 REVIEW DRAFT ONLY: manual no-network baseline. No live monitor.
 name: BuildShogi operations monitor
 'on':
   workflow_dispatch:
@@ -7,20 +7,15 @@ concurrency:
   group: buildshogi-operations-monitor
   cancel-in-progress: false
 jobs:
-  adopt:
-    if: github.repository == 'kokiSAT0/kokisat0.github.io' && github.ref == 'refs/heads/main' && github.run_attempt == 1 && github.run_number == 3
+  baseline:
+    if: github.repository == 'kokiSAT0/kokisat0.github.io' && github.ref == 'refs/heads/main' && github.run_attempt == 1
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read
-      issues: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Adopt exact blocked checkpoint once
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BUILDSHOGI_ADOPTION_APPROVED: 'true'
-          BUILDSHOGI_CONCURRENCY: buildshogi-operations-monitor
-        run: python3 -B .github/scripts/buildshogi_adopt.py --execute-approved-adoption
+      - name: Inactive baseline only
+        run: python3 -B .github/scripts/buildshogi_monitor.py
